@@ -1,19 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
 
-const TEAM_SOURCES = [
-  "Brazil",
-  "Flamengo",
-  "Palmeiras",
-  "Sao Paulo",
-  "Corinthians",
-  "Santos",
-  "Fluminense",
-  "Gremio",
-  "Internacional",
-  "Atletico Mineiro",
-];
-
 const FALLBACK_BRASIL_PLAYERS = [
   { name: "Alisson", team: "Liverpool", position: "Goalkeeper" },
   { name: "Ederson", team: "Manchester City", position: "Goalkeeper" },
@@ -60,15 +47,19 @@ const FORMATIONS = {
   "4-2-3-1": { G: 1, D: 4, M: 5, F: 1 },
 };
 
+const WIKIDATA_ENDPOINT = "https://query.wikidata.org/sparql";
+
 const jogadores = ref([]);
 const convocados = ref([]);
 const titulares = ref([]);
 const busca = ref("");
+const buscaApi = ref("");
 const carregando = ref(false);
 const erro = ref("");
 const fase = ref(1);
 const formacao = ref("4-3-3");
 const ultimaAtualizacao = ref("");
+const fonteAtual = ref("Wikidata");
 
 const regraTitulares = computed(() => FORMATIONS[formacao.value]);
 
@@ -89,6 +80,7 @@ const disponiveis = computed(() => {
     const naoConvocado = !convocados.value.some(
       (item) => item.id === jogador.id,
     );
+
     if (!naoConvocado) {
       return false;
     }
@@ -114,45 +106,43 @@ onMounted(() => {
 
 function getPositionGroup(position) {
   const valor = (position || "").toLowerCase();
-  if (valor.includes("goalkeeper") || valor.includes("keeper")) {
+
+  if (valor.includes("goalkeeper") || valor.includes("goleiro")) {
     return "G";
   }
+
   if (
     valor.includes("defender") ||
     valor.includes("back") ||
-    valor.includes("wing-back") ||
-    valor.includes("centre-back") ||
-    valor.includes("center-back")
+    valor.includes("lateral") ||
+    valor.includes("zagueiro")
   ) {
     return "D";
   }
-  if (valor.includes("midfielder") || valor.includes("mid")) {
+
+  if (
+    valor.includes("midfielder") ||
+    valor.includes("mid") ||
+    valor.includes("meia")
+  ) {
     return "M";
   }
+
   if (
     valor.includes("forward") ||
     valor.includes("striker") ||
     valor.includes("winger") ||
-    valor.includes("attacker")
+    valor.includes("atacante")
   ) {
     return "F";
   }
-  return "M";
-}
 
-function normalizarJogador(item) {
-  return {
-    id: item.idPlayer,
-    name: item.strPlayer || "Sem nome",
-    team: item.strTeam || "Sem clube",
-    position: item.strPosition || "Meia",
-    thumb: item.strCutout || item.strThumb || "",
-    updatedAt: item.dateModified || "",
-  };
+  return "M";
 }
 
 function gerarJogadoresFallback() {
   const stamp = new Date().toISOString().slice(0, 10);
+
   return FALLBACK_BRASIL_PLAYERS.map((item, index) => ({
     id: `fallback-${index + 1}`,
     name: item.name,
@@ -163,43 +153,88 @@ function gerarJogadoresFallback() {
   }));
 }
 
+function escaparSparqlLiteral(texto) {
+  return texto.replace(/\\/g, "\\\\").replace(/"/g, '\\"').toLowerCase();
+}
+
+function buildSparqlQuery(termo) {
+  const filtroNome = termo
+    ? `FILTER(CONTAINS(LCASE(?playerLabelRaw), "${escaparSparqlLiteral(termo)}"))`
+    : "";
+
+  return `
+SELECT DISTINCT ?player ?playerLabelRaw ?positionLabel ?clubLabel WHERE {
+  ?player wdt:P31 wd:Q5;
+          wdt:P106 wd:Q937857;
+          wdt:P27 wd:Q155;
+          wdt:P569 ?birthDate;
+          rdfs:label ?playerLabelRaw.
+
+  FILTER(LANG(?playerLabelRaw) IN ("pt", "en"))
+  FILTER(YEAR(?birthDate) >= 1986)
+  FILTER(NOT EXISTS { ?player wdt:P570 ?dateOfDeath })
+  ${filtroNome}
+
+  OPTIONAL { ?player wdt:P413 ?position. }
+  OPTIONAL { ?player wdt:P54 ?club. }
+
+  SERVICE wikibase:label { bd:serviceParam wikibase:language "pt,en". }
+}
+LIMIT 350
+`;
+}
+
 async function parseJsonSeguro(response) {
   const texto = await response.text();
+
   if (!texto) {
-    return { player: [] };
+    return {};
   }
 
   try {
     return JSON.parse(texto);
   } catch {
-    return { player: [] };
+    return {};
   }
 }
 
-async function carregarJogadores() {
+function normalizarWikidata(binding, index) {
+  const rawId = binding.player?.value || `sem-id-${index}`;
+  const id = rawId.includes("/") ? rawId.split("/").pop() : rawId;
+
+  return {
+    id,
+    name: binding.playerLabelRaw?.value || "Sem nome",
+    team: binding.clubLabel?.value || "Sem clube",
+    position: binding.positionLabel?.value || "Meia",
+    thumb: "",
+    updatedAt: new Date().toISOString().slice(0, 10),
+  };
+}
+
+async function carregarJogadores(termo = "") {
   carregando.value = true;
   erro.value = "";
 
   try {
-    const requests = TEAM_SOURCES.map((team) => {
-      const endpoint = `https://www.thesportsdb.com/api/v1/json/3/searchplayers.php?t=${encodeURIComponent(team)}`;
-      return fetch(endpoint).then(async (res) => {
-        if (!res.ok) {
-          throw new Error(`Falha ao buscar elenco de ${team}`);
-        }
-        return parseJsonSeguro(res);
-      });
+    const sparql = buildSparqlQuery(termo.trim());
+    const endpoint = `${WIKIDATA_ENDPOINT}?format=json&query=${encodeURIComponent(sparql)}`;
+
+    const res = await fetch(endpoint, {
+      headers: {
+        Accept: "application/sparql-results+json",
+      },
     });
 
-    const settled = await Promise.allSettled(requests);
-    const responses = settled
-      .filter((item) => item.status === "fulfilled")
-      .map((item) => item.value);
+    if (!res.ok) {
+      throw new Error(`Falha na API Wikidata (${res.status})`);
+    }
 
-    const bruto = responses.flatMap((response) => response?.player || []);
+    const data = await parseJsonSeguro(res);
+    const bindings = data?.results?.bindings || [];
     const vistos = new Set();
 
-    const deduplicado = bruto.map(normalizarJogador).filter((jogador) => {
+    const deduplicado = bindings.map(normalizarWikidata).filter((jogador) => {
       if (!jogador.id || vistos.has(jogador.id)) {
         return false;
       }
@@ -207,36 +242,33 @@ async function carregarJogadores() {
       return true;
     });
 
-    jogadores.value = deduplicado;
-
-    const falhas = settled.filter((item) => item.status === "rejected").length;
     if (!deduplicado.length) {
       jogadores.value = gerarJogadoresFallback();
+      fonteAtual.value = "Fallback local";
       ultimaAtualizacao.value = new Date().toISOString().slice(0, 10);
       erro.value =
-        "API externa indisponivel (limite/instabilidade). Carregamos uma base alternativa para voce continuar.";
+        "A consulta nao retornou jogadores no momento. Carregamos uma base alternativa para voce continuar.";
       return;
     }
-    if (falhas > 0) {
-      erro.value = `Algumas fontes falharam (${falhas}/${TEAM_SOURCES.length}), mas os dados foram carregados.`;
-    }
 
-    const datas = deduplicado
-      .map((jogador) => jogador.updatedAt)
-      .filter(Boolean)
-      .sort();
-
-    ultimaAtualizacao.value = datas.length
-      ? datas[datas.length - 1]
-      : "Não informado";
+    jogadores.value = deduplicado;
+    fonteAtual.value = "Wikidata";
+    ultimaAtualizacao.value = new Date().toISOString().slice(0, 10);
   } catch (err) {
+    jogadores.value = gerarJogadoresFallback();
+    fonteAtual.value = "Fallback local";
+    ultimaAtualizacao.value = new Date().toISOString().slice(0, 10);
     erro.value =
       err instanceof Error
-        ? err.message
-        : "Erro desconhecido ao carregar jogadores";
+        ? `${err.message}. Base alternativa carregada.`
+        : "Erro desconhecido ao carregar jogadores. Base alternativa carregada.";
   } finally {
     carregando.value = false;
   }
+}
+
+function buscarNaApi() {
+  carregarJogadores(buscaApi.value);
 }
 
 function convocar(jogador) {
@@ -268,6 +300,7 @@ function podeSelecionarTitular(jogador) {
 
 function alternarTitular(jogador) {
   const existe = titulares.value.some((item) => item.id === jogador.id);
+
   if (existe) {
     titulares.value = titulares.value.filter((item) => item.id !== jogador.id);
     return;
@@ -292,25 +325,42 @@ function voltarParaConvocacao() {
 <template>
   <main class="app-shell">
     <section class="hero">
-      <p class="hero-kicker">Seleção Brasileira</p>
-      <h1>Sua Convocação Oficial</h1>
+      <p class="hero-kicker">Selecao Brasileira</p>
+      <h1>Sua Convocacao Oficial</h1>
       <p>
-        Monte a lista de 26 nomes e depois escale os 11 titulares consumindo
-        dados da API pública TheSportsDB.
+        Busque jogadores brasileiros em geral na API publica Wikidata, convoque
+        26 nomes e depois escale os 11 titulares.
       </p>
+
       <div class="hero-meta">
         <span
           >Jogadores carregados: <strong>{{ jogadores.length }}</strong></span
         >
         <span
-          >Última atualização da API:
-          <strong>{{ ultimaAtualizacao }}</strong></span
+          >Fonte atual: <strong>{{ fonteAtual }}</strong></span
+        >
+        <span
+          >Ultima atualizacao: <strong>{{ ultimaAtualizacao }}</strong></span
         >
       </div>
+
+      <div class="api-search-row">
+        <input
+          v-model="buscaApi"
+          type="search"
+          placeholder="Buscar na API por nome (ex: vinicius, endrick, neymar)"
+          @keyup.enter="buscarNaApi"
+        />
+        <button class="primary" @click="buscarNaApi" :disabled="carregando">
+          Buscar brasileiros
+        </button>
+      </div>
+
       <div class="hero-actions">
         <button class="ghost" @click="carregarJogadores" :disabled="carregando">
-          {{ carregando ? "Atualizando..." : "Atualizar dados da API" }}
+          {{ carregando ? "Atualizando..." : "Carregar lista geral" }}
         </button>
+
         <button
           v-if="fase === 1"
           class="primary"
@@ -319,8 +369,9 @@ function voltarParaConvocacao() {
         >
           Escalar titulares
         </button>
+
         <button v-else class="ghost" @click="voltarParaConvocacao">
-          Voltar para convocação
+          Voltar para convocacao
         </button>
       </div>
     </section>
@@ -334,7 +385,7 @@ function voltarParaConvocacao() {
           <input
             v-model="busca"
             type="search"
-            placeholder="Buscar por nome, clube ou posição"
+            placeholder="Filtrar por nome, clube ou posicao"
           />
         </header>
         <ul class="player-list">
@@ -348,9 +399,9 @@ function voltarParaConvocacao() {
               :src="jogador.thumb"
               :alt="`Foto de ${jogador.name}`"
             />
-            <div>
+            <div class="player-info">
               <strong>{{ jogador.name }}</strong>
-              <small>{{ jogador.team }} • {{ jogador.position }}</small>
+              <small>{{ jogador.team }} - {{ jogador.position }}</small>
             </div>
             <button
               class="primary"
@@ -366,7 +417,7 @@ function voltarParaConvocacao() {
       <article class="panel">
         <header>
           <h2>Convocados ({{ convocados.length }}/26)</h2>
-          <p>Você precisa fechar 26 nomes para liberar a escalação titular.</p>
+          <p>Feche 26 nomes para liberar a escalacao titular.</p>
         </header>
         <ul class="player-list">
           <li
@@ -381,7 +432,7 @@ function voltarParaConvocacao() {
             />
             <div>
               <strong>{{ jogador.name }}</strong>
-              <small>{{ jogador.team }} • {{ jogador.position }}</small>
+              <small>{{ jogador.team }} - {{ jogador.position }}</small>
             </div>
             <button class="danger" @click="removerConvocado(jogador)">
               Remover
@@ -394,7 +445,7 @@ function voltarParaConvocacao() {
     <section v-else class="grid grid-2">
       <article class="panel">
         <header>
-          <h2>Defina a formação</h2>
+          <h2>Defina a formacao</h2>
           <select v-model="formacao">
             <option v-for="(value, key) in FORMATIONS" :key="key" :value="key">
               {{ key }}
@@ -418,7 +469,7 @@ function voltarParaConvocacao() {
             />
             <div>
               <strong>{{ jogador.name }}</strong>
-              <small>{{ jogador.team }} • {{ jogador.position }}</small>
+              <small>{{ jogador.team }} - {{ jogador.position }}</small>
             </div>
             <button
               class="primary"
@@ -439,15 +490,15 @@ function voltarParaConvocacao() {
         <header>
           <h2>Seu time titular ({{ titulares.length }}/11)</h2>
           <p>
-            GOL {{ titularesPorGrupo.G }}/{{ regraTitulares.G }} • DEF
-            {{ titularesPorGrupo.D }}/{ { regraTitulares.D } } • MEI
-            {{ titularesPorGrupo.M }}/{{ regraTitulares.M }} • ATA
-            {{ titularesPorGrupo.F }}/{ { regraTitulares.F } }
+            GOL {{ titularesPorGrupo.G }}/{{ regraTitulares.G }} - DEF
+            {{ titularesPorGrupo.D }}/{{ regraTitulares.D }} - MEI
+            {{ titularesPorGrupo.M }}/{{ regraTitulares.M }} - ATA
+            {{ titularesPorGrupo.F }}/{{ regraTitulares.F }}
           </p>
           <p class="status" :class="{ ok: titularesCompletos }">
             {{
               titularesCompletos
-                ? "Escalação completa."
+                ? "Escalacao completa."
                 : "Selecione exatamente 11 titulares."
             }}
           </p>
@@ -465,7 +516,7 @@ function voltarParaConvocacao() {
             />
             <div>
               <strong>{{ jogador.name }}</strong>
-              <small>{{ jogador.team }} • {{ jogador.position }}</small>
+              <small>{{ jogador.team }} - {{ jogador.position }}</small>
             </div>
             <button class="danger" @click="alternarTitular(jogador)">
               Tirar do time
