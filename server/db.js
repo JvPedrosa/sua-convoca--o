@@ -24,25 +24,61 @@ export function initDatabase() {
       `,
       );
 
-      db.get("SELECT COUNT(*) AS total FROM players", (countErr, row) => {
-        if (countErr) {
-          reject(countErr);
+      db.run(
+        `
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_players_name_team
+        ON players(name, team)
+      `,
+      );
+
+      const upsert = db.prepare(
+        `
+        INSERT INTO players (name, team, position)
+        VALUES (?, ?, ?)
+        ON CONFLICT(name, team)
+        DO UPDATE SET position = excluded.position
+      `,
+      );
+
+      playersSeed.forEach((player) => {
+        upsert.run(player.name, player.team, player.position);
+      });
+
+      upsert.finalize((finalizeErr) => {
+        if (finalizeErr) {
+          reject(finalizeErr);
           return;
         }
 
-        if (row.total === 0) {
-          const insert = db.prepare(
-            "INSERT INTO players (name, team, position) VALUES (?, ?, ?)",
+        const seedKeys = new Set(playersSeed.map((p) => `${p.name}|${p.team}`));
+
+        db.all("SELECT id, name, team FROM players", (selectErr, rows) => {
+          if (selectErr) {
+            reject(selectErr);
+            return;
+          }
+
+          const staleRows = rows.filter(
+            (row) => !seedKeys.has(`${row.name}|${row.team}`),
           );
 
-          playersSeed.forEach((player) => {
-            insert.run(player.name, player.team, player.position);
+          if (!staleRows.length) {
+            resolve(db);
+            return;
+          }
+
+          const remove = db.prepare("DELETE FROM players WHERE id = ?");
+          staleRows.forEach((row) => remove.run(row.id));
+
+          remove.finalize((removeErr) => {
+            if (removeErr) {
+              reject(removeErr);
+              return;
+            }
+
+            resolve(db);
           });
-
-          insert.finalize();
-        }
-
-        resolve(db);
+        });
       });
     });
   });
@@ -58,12 +94,28 @@ export function listPlayers(db, search = "") {
         SELECT id, name, team, position
         FROM players
         WHERE LOWER(name) LIKE ? OR LOWER(team) LIKE ? OR LOWER(position) LIKE ?
-        ORDER BY name ASC
+        ORDER BY
+          CASE
+            WHEN LOWER(position) LIKE '%goalkeeper%' OR LOWER(position) LIKE '%goleiro%' THEN 1
+            WHEN LOWER(position) LIKE '%defender%' OR LOWER(position) LIKE '%defensor%' OR LOWER(position) LIKE '%zagueiro%' OR LOWER(position) LIKE '%lateral%' THEN 2
+            WHEN LOWER(position) LIKE '%midfielder%' OR LOWER(position) LIKE '%meia%' OR LOWER(position) LIKE '%volante%' THEN 3
+            WHEN LOWER(position) LIKE '%forward%' OR LOWER(position) LIKE '%atacante%' OR LOWER(position) LIKE '%ponta%' OR LOWER(position) LIKE '%centroavante%' THEN 4
+            ELSE 5
+          END ASC,
+          name ASC
       `
       : `
         SELECT id, name, team, position
         FROM players
-        ORDER BY name ASC
+        ORDER BY
+          CASE
+            WHEN LOWER(position) LIKE '%goalkeeper%' OR LOWER(position) LIKE '%goleiro%' THEN 1
+            WHEN LOWER(position) LIKE '%defender%' OR LOWER(position) LIKE '%defensor%' OR LOWER(position) LIKE '%zagueiro%' OR LOWER(position) LIKE '%lateral%' THEN 2
+            WHEN LOWER(position) LIKE '%midfielder%' OR LOWER(position) LIKE '%meia%' OR LOWER(position) LIKE '%volante%' THEN 3
+            WHEN LOWER(position) LIKE '%forward%' OR LOWER(position) LIKE '%atacante%' OR LOWER(position) LIKE '%ponta%' OR LOWER(position) LIKE '%centroavante%' THEN 4
+            ELSE 5
+          END ASC,
+          name ASC
       `;
 
     const params = hasSearch

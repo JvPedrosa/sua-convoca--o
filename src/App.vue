@@ -8,10 +8,18 @@ const FORMATIONS = {
   "4-2-3-1": { G: 1, D: 4, M: 5, F: 1 },
 };
 
+const POSITION_FILTERS = [
+  { key: "G", label: "Goleiro" },
+  { key: "D", label: "Defesa" },
+  { key: "M", label: "Meio" },
+  { key: "F", label: "Ataque" },
+];
+
 const jogadores = ref([]);
 const convocados = ref([]);
 const titulares = ref([]);
 const busca = ref("");
+const filtroPosicao = ref("G");
 const carregando = ref(false);
 const erro = ref("");
 const fase = ref(1);
@@ -32,6 +40,47 @@ const titularesPorGrupo = computed(() => {
   );
 });
 
+const titularesAgrupados = computed(() => {
+  return titulares.value.reduce(
+    (acc, jogador) => {
+      const grupo = getPositionGroup(jogador.position);
+      acc[grupo].push(jogador);
+      return acc;
+    },
+    { G: [], D: [], M: [], F: [] },
+  );
+});
+
+const linhasCampo = computed(() => {
+  const regra = regraTitulares.value;
+  return [
+    {
+      group: "F",
+      label: "Ataque",
+      count: regra.F,
+      players: titularesAgrupados.value.F,
+    },
+    {
+      group: "M",
+      label: "Meio",
+      count: regra.M,
+      players: titularesAgrupados.value.M,
+    },
+    {
+      group: "D",
+      label: "Defesa",
+      count: regra.D,
+      players: titularesAgrupados.value.D,
+    },
+    {
+      group: "G",
+      label: "Goleiro",
+      count: regra.G,
+      players: titularesAgrupados.value.G,
+    },
+  ];
+});
+
 const disponiveis = computed(() => {
   const termo = busca.value.trim().toLowerCase();
   return jogadores.value.filter((jogador) => {
@@ -44,14 +93,18 @@ const disponiveis = computed(() => {
     }
 
     if (!termo) {
-      return true;
+      return getPositionGroup(jogador.position) === filtroPosicao.value;
     }
 
-    return (
+    const matchTexto =
       jogador.name.toLowerCase().includes(termo) ||
       jogador.team.toLowerCase().includes(termo) ||
-      jogador.position.toLowerCase().includes(termo)
-    );
+      jogador.position.toLowerCase().includes(termo);
+
+    const matchPosicao =
+      getPositionGroup(jogador.position) === filtroPosicao.value;
+
+    return matchTexto && matchPosicao;
   });
 });
 
@@ -81,7 +134,8 @@ function getPositionGroup(position) {
   if (
     valor.includes("midfielder") ||
     valor.includes("mid") ||
-    valor.includes("meia")
+    valor.includes("meia") ||
+    valor.includes("volante")
   ) {
     return "M";
   }
@@ -90,12 +144,34 @@ function getPositionGroup(position) {
     valor.includes("forward") ||
     valor.includes("striker") ||
     valor.includes("winger") ||
-    valor.includes("atacante")
+    valor.includes("atacante") ||
+    valor.includes("ponta") ||
+    valor.includes("centroavante")
   ) {
     return "F";
   }
 
   return "M";
+}
+
+function getPositionClass(position) {
+  const group = getPositionGroup(position);
+  if (group === "G") return "pos-g";
+  if (group === "D") return "pos-d";
+  if (group === "M") return "pos-m";
+  return "pos-f";
+}
+
+function getPositionLabel(position) {
+  const group = getPositionGroup(position);
+  if (group === "G") return "GOL";
+  if (group === "D") return "DEF";
+  if (group === "M") return "MEI";
+  return "ATA";
+}
+
+function selecionarFiltroPosicao(group) {
+  filtroPosicao.value = group;
 }
 
 async function parseJsonSeguro(response) {
@@ -206,7 +282,7 @@ function voltarParaConvocacao() {
   <main class="app-shell">
     <section class="hero">
       <p class="hero-kicker">Selecao Brasileira</p>
-      <h1>Sua Convocacao Oficial</h1>
+      <h1>Sua Convocação Oficial</h1>
       <p>
         Dados de jogadores servidos por uma API propria com banco SQLite.
         Convoque 26 nomes e depois escale os 11 titulares.
@@ -239,7 +315,7 @@ function voltarParaConvocacao() {
         </button>
 
         <button v-else class="ghost" @click="voltarParaConvocacao">
-          Voltar para convocacao
+          Voltar para convocação
         </button>
       </div>
     </section>
@@ -256,16 +332,36 @@ function voltarParaConvocacao() {
             placeholder="Filtrar por nome, clube ou posicao"
             @keyup.enter="atualizarDaApi"
           />
+          <div class="position-filters">
+            <button
+              v-for="filtro in POSITION_FILTERS"
+              :key="filtro.key"
+              type="button"
+              :class="[
+                'filter-chip',
+                `chip-${filtro.key.toLowerCase()}`,
+                { active: filtroPosicao === filtro.key },
+              ]"
+              @click="selecionarFiltroPosicao(filtro.key)"
+            >
+              {{ filtro.label }}
+            </button>
+          </div>
         </header>
         <ul class="player-list">
           <li
             v-for="jogador in disponiveis"
             :key="jogador.id"
-            class="player-item"
+            :class="['player-item', getPositionClass(jogador.position)]"
           >
             <div class="player-info">
               <strong>{{ jogador.name }}</strong>
-              <small>{{ jogador.team }} - {{ jogador.position }}</small>
+              <small>
+                <span class="pos-badge">{{
+                  getPositionLabel(jogador.position)
+                }}</span>
+                {{ jogador.team }} - {{ jogador.position }}
+              </small>
             </div>
             <button
               class="primary"
@@ -287,11 +383,16 @@ function voltarParaConvocacao() {
           <li
             v-for="jogador in convocados"
             :key="jogador.id"
-            class="player-item"
+            :class="['player-item', getPositionClass(jogador.position)]"
           >
             <div class="player-info">
               <strong>{{ jogador.name }}</strong>
-              <small>{{ jogador.team }} - {{ jogador.position }}</small>
+              <small>
+                <span class="pos-badge">{{
+                  getPositionLabel(jogador.position)
+                }}</span>
+                {{ jogador.team }} - {{ jogador.position }}
+              </small>
             </div>
             <button class="danger" @click="removerConvocado(jogador)">
               Remover
@@ -315,15 +416,51 @@ function voltarParaConvocacao() {
             {{ regraTitulares.M }} MEI, {{ regraTitulares.F }} ATA
           </p>
         </header>
+        <div class="pitch">
+          <div class="pitch-inner">
+            <div
+              v-for="linha in linhasCampo"
+              :key="linha.group"
+              class="pitch-row"
+            >
+              <span class="pitch-label">{{ linha.label }}</span>
+              <div class="pitch-slots">
+                <div
+                  v-for="idx in linha.count"
+                  :key="`${linha.group}-${idx}`"
+                  :class="[
+                    'pitch-slot',
+                    `pitch-${linha.group.toLowerCase()}`,
+                    { filled: !!linha.players[idx - 1] },
+                  ]"
+                >
+                  <template v-if="linha.players[idx - 1]">
+                    <strong>{{ linha.players[idx - 1].name }}</strong>
+                    <small>{{ linha.players[idx - 1].team }}</small>
+                  </template>
+                  <template v-else>
+                    <strong>Vaga</strong>
+                    <small>{{ linha.group }}</small>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
         <ul class="player-list">
           <li
             v-for="jogador in convocados"
             :key="jogador.id"
-            class="player-item"
+            :class="['player-item', getPositionClass(jogador.position)]"
           >
             <div class="player-info">
               <strong>{{ jogador.name }}</strong>
-              <small>{{ jogador.team }} - {{ jogador.position }}</small>
+              <small>
+                <span class="pos-badge">{{
+                  getPositionLabel(jogador.position)
+                }}</span>
+                {{ jogador.team }} - {{ jogador.position }}
+              </small>
             </div>
             <button
               class="primary"
@@ -361,11 +498,16 @@ function voltarParaConvocacao() {
           <li
             v-for="jogador in titulares"
             :key="jogador.id"
-            class="player-item"
+            :class="['player-item', getPositionClass(jogador.position)]"
           >
             <div class="player-info">
               <strong>{{ jogador.name }}</strong>
-              <small>{{ jogador.team }} - {{ jogador.position }}</small>
+              <small>
+                <span class="pos-badge">{{
+                  getPositionLabel(jogador.position)
+                }}</span>
+                {{ jogador.team }} - {{ jogador.position }}
+              </small>
             </div>
             <button class="danger" @click="alternarTitular(jogador)">
               Tirar do time
